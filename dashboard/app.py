@@ -52,7 +52,6 @@ st.header("Retention by platform (daily)")
 
 retention_platform_query = """
 WITH first_events AS (
-    -- фиксируем первый визит пользователя + его "родную" платформу
     SELECT DISTINCT ON (user_id)
         user_id,
         DATE(event_time) AS signup_date,
@@ -62,7 +61,6 @@ WITH first_events AS (
 ),
 
 activity AS (
-    -- считаем дни жизни пользователя относительно signup_date
     SELECT 
         e.user_id,
         f.platform,
@@ -73,7 +71,6 @@ activity AS (
 ),
 
 cohort_size AS (
-    -- размер когорты (день 0) по платформе первого визита
     SELECT 
         platform,
         COUNT(DISTINCT user_id) AS users
@@ -81,20 +78,31 @@ cohort_size AS (
     GROUP BY platform
 ),
 
+days AS (
+    SELECT generate_series(0, 30) AS day
+),
+
 retention AS (
     SELECT 
-        a.platform,
-        a.day,
-        COUNT(DISTINCT a.user_id) AS active_users
-    FROM activity a
-    WHERE a.day <= 30
-    GROUP BY a.platform, a.day
+        f.platform,
+        d.day,
+        COUNT(DISTINCT f.user_id) FILTER (
+            WHERE EXISTS (
+                SELECT 1 
+                FROM activity a 
+                WHERE a.user_id = f.user_id 
+                AND a.day >= d.day
+            )
+        ) AS retained_users
+    FROM first_events f
+    CROSS JOIN days d
+    GROUP BY f.platform, d.day
 )
 
 SELECT 
     r.platform,
     r.day,
-    r.active_users * 100.0 / c.users AS retention
+    r.retained_users * 100.0 / c.users AS retention
 FROM retention r
 JOIN cohort_size c ON r.platform = c.platform
 ORDER BY r.platform, r.day
