@@ -1,3 +1,4 @@
 pandas
 streamlit
 psycopg2-binary
+sqlalchemy
