@@ -1,29 +1,40 @@
-WITH first_visit AS (
-SELECT 
-user_id, 
-MIN(DATE(event_time)) AS first_date 
-FROM events
-GROUP BY user_id
-ORDER BY first_date
+WITH first_events AS (
+    SELECT DISTINCT ON (user_id)
+        user_id,
+        DATE(event_time) AS signup_date,
+        platform
+    FROM user_events
+    ORDER BY user_id, event_time
 ),
 activity AS (
-SELECT
-e.user_id,
-DATE(e.event_time) AS event_time,
-f.first_date,
-DATE(e.event_time) - f.first_date AS day
-FROM events e
-JOIN first_visit f ON e.user_id = f.user_id
+    SELECT 
+        e.user_id,
+        f.platform,
+        DATE(e.event_time) - f.signup_date AS day
+    FROM user_events e
+    JOIN first_events f ON e.user_id = f.user_id
+    WHERE DATE(e.event_time) >= f.signup_date
 ),
-
-cohort_size AS (SELECT COUNT(DISTINCT user_id) as total_users FROM first_visit)
-
-SELECT
-day,
-COUNT(DISTINCT user_id) AS users,
-ROUND(COUNT(DISTINCT user_id)*100 / (SELECT total_users FROM cohort_size), 2) AS retention_percent
-FROM
-activity
-GROUP BY day
-ORDER BY day
-LIMIT 15
+cohort_size AS (
+    SELECT 
+        platform,
+        COUNT(DISTINCT user_id) AS users
+    FROM first_events
+    GROUP BY platform
+),
+retention AS (
+    SELECT 
+        a.platform,
+        a.day,
+        COUNT(DISTINCT a.user_id) AS active_users
+    FROM activity a
+    WHERE a.day <= 30
+    GROUP BY a.platform, a.day
+)
+SELECT 
+    r.platform,
+    r.day,
+    r.active_users * 100.0 / c.users AS retention
+FROM retention r
+JOIN cohort_size c ON r.platform = c.platform
+ORDER BY r.platform, r.day
