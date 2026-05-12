@@ -2,8 +2,9 @@ import os
 import streamlit as st
 import pandas as pd
 import psycopg2
+import altair as alt
 
-# функция для загрузки SQL из файлов
+# --- Функция для загрузки SQL из файлов ---
 def load_sql(filename):
     base_dir = os.path.dirname(__file__)
     path = os.path.join(base_dir, '..', 'sql', filename)
@@ -11,7 +12,6 @@ def load_sql(filename):
         return f.read()
 
 # --- подключение к базе ---
-
 conn = psycopg2.connect(
     dbname=os.getenv("DB_NAME"),
     user=os.getenv("DB_USER"),
@@ -28,75 +28,20 @@ st.title("📊 Product Analytics Dashboard")
 # =========================
 st.header("DAU (Daily Active Users)")
 
-
-dau_platform = pd.read_sql("""
-SELECT 
-    DATE(event_time) as date,
-    platform,
-    COUNT(DISTINCT user_id) as dau
-FROM user_events
-GROUP BY date, platform
-""", conn)
+# Загружаем SQL из файла
+dau_query = load_sql('dau.sql')
+dau_platform = pd.read_sql(dau_query, conn)
 
 st.line_chart(dau_platform.pivot(index="date", columns="platform", values="dau"))
-
 
 # =========================
 # Retention
 # =========================
 st.header("Retention by platform (daily)")
 
-retention_platform_query = """
-WITH first_events AS (
-    -- фиксируем первый визит пользователя + его "родную" платформу
-    SELECT DISTINCT ON (user_id)
-        user_id,
-        DATE(event_time) AS signup_date,
-        platform
-    FROM user_events
-    ORDER BY user_id, event_time
-),
-
-activity AS (
-    -- считаем дни жизни пользователя относительно signup_date
-    SELECT 
-        e.user_id,
-        f.platform,
-        DATE(e.event_time) - f.signup_date AS day
-    FROM user_events e
-    JOIN first_events f ON e.user_id = f.user_id
-    WHERE DATE(e.event_time) >= f.signup_date
-),
-
-cohort_size AS (
-    -- размер когорты (день 0) по платформе первого визита
-    SELECT 
-        platform,
-        COUNT(DISTINCT user_id) AS users
-    FROM first_events
-    GROUP BY platform
-),
-
-retention AS (
-    SELECT 
-        a.platform,
-        a.day,
-        COUNT(DISTINCT a.user_id) AS active_users
-    FROM activity a
-    WHERE a.day <= 30
-    GROUP BY a.platform, a.day
-)
-
-SELECT 
-    r.platform,
-    r.day,
-    r.active_users * 100.0 / c.users AS retention
-FROM retention r
-JOIN cohort_size c ON r.platform = c.platform
-ORDER BY r.platform, r.day
-"""
-
-retention_platform_df = pd.read_sql(retention_platform_query, conn)
+# Загружаем SQL из файла
+retention_query = load_sql('retention.sql')
+retention_platform_df = pd.read_sql(retention_query, conn)
 
 pivot_df = retention_platform_df.pivot(
     index="day",
@@ -110,61 +55,46 @@ st.line_chart(pivot_df)
 # =========================
 st.header("Funnel")
 
-# --- SQL ---
-funnel_platform_query = """
-SELECT 
-    platform,
-    COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'login') as login,
-    COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'view_note') as view_note,
-    COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'create_note') as create_note
-FROM user_events
-GROUP BY platform;
-"""
+funnel_query = load_sql('funnel.sql')
+fp_df = pd.read_sql(funnel_query, conn)
 
-fp_df = pd.read_sql(funnel_platform_query, conn)
+# Расчет конверсий
+fp_df["conversion_to_view"] = (fp_df["view_note"] / fp_df["login"] * 100).round(2)
+fp_df["conversion_to_create"] = (fp_df["create_note"] / fp_df["login"] * 100).round(2)
+fp_df["view_to_create"] = (fp_df["create_note"] / fp_df["view_note"] * 100).round(2)
 
-# --- конверсии ---
-fp_df["conversion_to_view"] = fp_df["view_note"] / fp_df["login"] * 100
-fp_df["conversion_to_create"] = fp_df["create_note"] / fp_df["login"] * 100
-fp_df["view_to_create"] = fp_df["create_note"] / fp_df["view_note"] * 100
+st.subheader("Funnel Table")
+st.dataframe(fp_df, use_container_width=True)
 
-# --- таблица ---
-st.subheader("Funnel table")
-st.dataframe(fp_df)
+st.subheader("Visual Funnel by Platform")
 
-# --- подготовка данных для графика ---
-plot_df = fp_df.set_index("platform")[["login", "view_note", "create_note"]].T
-
-# фикс порядка шагов (ВАЖНО)
-plot_df = plot_df.reindex(["login", "view_note", "create_note"])
-
-# (опционально — красивое название шагов)
-plot_df.index = ["Login", "View Note", "Create Note"]
-
-# --- график ---
-import altair as alt
-
-st.subheader("Funnel by platform")
-
-# возвращаем в "длинный" формат
-plot_long = plot_df.reset_index().melt(
-    id_vars="index",
-    var_name="platform",
+# Подготовка данных для Altair (long format)
+plot_long = fp_df.melt(
+    id_vars="platform", 
+    value_vars=["login", "view_note", "create_note"],
+    var_name="step", 
     value_name="users"
 )
 
-plot_long = plot_long.rename(columns={"index": "step"})
+# Красивые названия и порядок шагов
+step_map = {
+    "login": "1. Login",
+    "view_note": "2. View Note",
+    "create_note": "3. Create Note"
+}
+plot_long["step"] = plot_long["step"].map(step_map)
+step_order = ["1. Login", "2. View Note", "3. Create Note"]
 
-# фикс порядка шагов
-step_order = ["Login", "View Note", "Create Note"]
-
+# Отрисовка столбчатой диаграммы
 chart = alt.Chart(plot_long).mark_bar().encode(
-    x=alt.X("step:N", sort=step_order),
-    y="users:Q",
-    color="platform:N"
-)
+    x=alt.X("step:N", sort=step_order, title="Step"),
+    y=alt.Y("users:Q", title="Unique Users"),
+    color=alt.Color("platform:N", title="Platform"),
+    column="platform:N" # Разделение на колонки для сравнения платформ
+).properties(width=200, height=400)
 
-st.altair_chart(chart, use_container_width=True)
+st.altair_chart(chart)
+
 # посмотреть датасет
 st.header("Data")
 
